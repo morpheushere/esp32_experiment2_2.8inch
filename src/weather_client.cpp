@@ -7,12 +7,10 @@
 #include "secrets.h"
 #include "tab_weather.h"
 
-// Comment this out once secrets.h has real WiFi/NAS values and the mock
-// rendering/null-handling checklist has passed — see the plan's
-// verification section. While defined, WiFi/HTTP are bypassed entirely and
-// a fixed sample payload (including deliberately-null fields) is fed
-// straight into the same JSON-parsing/UI-update path the real fetch uses.
-#define USE_MOCK_WEATHER_DATA
+// Mock rendering/null-handling checklist passed; secrets.h now has real
+// WiFi/NAS values, so this is off and the real HTTP path below is live.
+// Re-enable to bypass WiFi/HTTP with a fixed sample payload again.
+// #define USE_MOCK_WEATHER_DATA
 
 namespace {
 
@@ -22,13 +20,18 @@ constexpr unsigned long CONNECT_ATTEMPT_TIMEOUT_MS = 15000;
 constexpr unsigned long BACKOFF_SCHEDULE_MS[] = {1000, 2000, 5000, 10000, 30000};
 constexpr size_t BACKOFF_STEPS = sizeof(BACKOFF_SCHEDULE_MS) / sizeof(BACKOFF_SCHEDULE_MS[0]);
 
+// Rainfall is deliberately non-null and above the RAIN threshold, and three
+// of the four trends carry a real series -- between this and the nulls
+// left on wind_trend, every condition_label() branch and both sparkline
+// code paths (real series vs. count<2 placeholder) get exercised in mock
+// mode before the real NAS host:port is even filled in.
 const char *MOCK_WEATHER_JSON = R"json(
 {
   "temp_c": 21.7, "humidity_pct": 46.0, "pressure_hpa": 1013.2,
-  "wind_speed": 4.0, "wind_dir": null, "rainfall": null,
-  "temp_trend": {"direction": "rising", "delta": 0.3, "series": []},
-  "humidity_trend": {"direction": "steady", "delta": 0.2, "series": []},
-  "pressure_trend": {"direction": "falling", "delta": -1.1, "series": []},
+  "wind_speed": 4.0, "wind_dir": null, "rainfall": 0.3,
+  "temp_trend": {"direction": "rising", "delta": 0.3, "series": [20.1, 20.4, 20.9, 21.2, 21.7]},
+  "humidity_trend": {"direction": "steady", "delta": 0.2, "series": [45.1, 45.6, 45.9, 46.2, 46.0]},
+  "pressure_trend": {"direction": "falling", "delta": -1.1, "series": [1016.0, 1015.1, 1014.0, 1013.6, 1013.2]},
   "wind_trend": {"direction": null, "delta": null, "series": []}
 }
 )json";
@@ -82,6 +85,20 @@ void refresh_status_line() {
   weather_set_status_line(buf);
 }
 
+// A trend object can be entirely absent, or present with a null direction
+// and/or empty series -- every case degrades to WeatherTrend's own
+// nullptr/count==0 defaults rather than crashing or misreading.
+void parse_trend(JsonVariantConst v, WeatherTrend &t) {
+  t.direction = v["direction"] | static_cast<const char *>(nullptr);
+  t.count = 0;
+  JsonArrayConst series = v["series"];
+  if (series.isNull()) return;
+  for (JsonVariantConst s : series) {
+    if (t.count >= WEATHER_TREND_SERIES_MAX) break;
+    t.series[t.count++] = s.as<float>();
+  }
+}
+
 // Shared by both the mock path and the real HTTP path: extracts every
 // field null-safely (any of them can legitimately be absent/null per the
 // API's own documented degradation behavior) and pushes the result into
@@ -92,12 +109,11 @@ void apply_weather_json(JsonDocument &doc) {
   r.humidity_pct = doc["humidity_pct"] | NAN;
   r.pressure_hpa = doc["pressure_hpa"] | NAN;
   r.wind_speed = doc["wind_speed"] | NAN;
-  r.temp_trend.direction = doc["temp_trend"]["direction"] | static_cast<const char *>(nullptr);
-  r.humidity_trend.direction =
-      doc["humidity_trend"]["direction"] | static_cast<const char *>(nullptr);
-  r.pressure_trend.direction =
-      doc["pressure_trend"]["direction"] | static_cast<const char *>(nullptr);
-  r.wind_trend.direction = doc["wind_trend"]["direction"] | static_cast<const char *>(nullptr);
+  r.rainfall = doc["rainfall"] | NAN;
+  parse_trend(doc["temp_trend"], r.temp_trend);
+  parse_trend(doc["humidity_trend"], r.humidity_trend);
+  parse_trend(doc["pressure_trend"], r.pressure_trend);
+  parse_trend(doc["wind_trend"], r.wind_trend);
 
   Serial.printf(
       "[JSON] parsed OK: temp_c=%.1f humidity_pct=%.1f pressure_hpa=%.1f wind_speed=%.1f "
@@ -108,7 +124,8 @@ void apply_weather_json(JsonDocument &doc) {
   weather_apply_reading(r);
 
   float display_f = isnan(r.temp_c) ? NAN : (r.temp_c * 9.0f / 5.0f + 32.0f);
-  Serial.printf("[UI] temp label updated: %.0fF (%.1fC)\n", display_f, r.temp_c);
+  Serial.printf("[UI] scene updated: %.0fF (%.1fC), condition=%s\n", display_f, r.temp_c,
+                condition_label(r));
 }
 
 #ifdef USE_MOCK_WEATHER_DATA
@@ -118,7 +135,7 @@ void mock_poll_tick() {
   if (last_mock_ms != 0 && millis() - last_mock_ms < MOCK_POLL_INTERVAL_MS) return;
   last_mock_ms = millis();
 
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<2048> doc;
   DeserializationError err = deserializeJson(doc, MOCK_WEATHER_JSON);
   if (err == DeserializationError::Ok) {
     apply_weather_json(doc);
@@ -189,7 +206,7 @@ void real_poll_tick() {
 
   if (code == 200) {
     String body = http.getString();
-    StaticJsonDocument<1024> doc;
+    StaticJsonDocument<2048> doc;
     DeserializationError err = deserializeJson(doc, body);
     if (err == DeserializationError::Ok) {
       Serial.printf("[HTTP] GET %s -> 200 OK (%d bytes)\n", url.c_str(), body.length());
