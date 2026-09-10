@@ -9,12 +9,11 @@
 #include "secrets.h"
 #include "tab_spotify.h"
 
-// Comment out once the backend's Spotify integration (strava-heatmap-pwa's
-// api/spotify_client.py) is deployed and verified live via curl -- mirrors
-// weather_client.cpp's USE_MOCK_WEATHER_DATA. While defined, HTTP is
-// bypassed and a fixed sample payload + a generated checkerboard test
-// pattern (standing in for real album art) exercise the same code paths.
-#define USE_MOCK_SPOTIFY_DATA
+// Backend deployed and verified live via curl (real track/art data
+// confirmed at /api/spotify/now-playing and /api/spotify/art.raw) --
+// mock mode off, live HTTP path now in use. Re-enable to bypass HTTP with
+// a fixed sample payload + checkerboard test pattern again.
+// #define USE_MOCK_SPOTIFY_DATA
 
 namespace {
 
