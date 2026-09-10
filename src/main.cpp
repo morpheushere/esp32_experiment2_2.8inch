@@ -2,6 +2,7 @@
 #include <lvgl.h>
 
 #include "display_init.h"
+#include "spotify_client.h"
 #include "ui_tabview.h"
 #include "weather_client.h"
 
@@ -13,6 +14,7 @@ void setup() {
   display_init();
   build_tabview();
   weather_client_init();
+  spotify_client_init();
 
   g_last_tick_ms = millis();
 }
@@ -24,6 +26,7 @@ void loop() {
 
   lv_timer_handler();
   weather_client_tick();
+  spotify_client_tick();
 
   delay(5);
 }

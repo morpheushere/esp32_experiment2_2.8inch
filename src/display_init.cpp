@@ -28,9 +28,17 @@ static void disp_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
 static void touchpad_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
   int32_t x, y;
   if (lcd.getTouch(&x, &y)) {
+    // lcd.getTouch() (with the x_min/x_max/y_min/y_max in LGFX_CYD.hpp)
+    // comes back fully mirrored on both axes on this specific unit --
+    // measured live: tapping "Weather" (true screen x~53) read x~248, and
+    // top tab-bar taps (true y~16) read y~205-217. Not a clean LGFX-config
+    // fix (a min/max swap there gets recombined with setRotation(1) in a
+    // way that didn't produce the naive expected result), so corrected
+    // directly here instead, against the real measured data rather than
+    // guessing at the library's internal rotation semantics again.
     data->state = LV_INDEV_STATE_PR;
-    data->point.x = x;
-    data->point.y = y;
+    data->point.x = SCREEN_W - 1 - x;
+    data->point.y = SCREEN_H - 1 - y;
   } else {
     data->state = LV_INDEV_STATE_REL;
   }

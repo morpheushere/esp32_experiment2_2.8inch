@@ -52,8 +52,15 @@ public:
     }
     {
       auto cfg = _touch.config();
-      cfg.x_min = 0;
-      cfg.x_max = 4095;
+      // x_min/x_max swapped (not 0/4095) -- measured live: tapping the
+      // left edge of the screen (the "Weather" tab) was registering on the
+      // right edge ("Tab 3"), while Y tracked correctly. That's this
+      // panel's raw touch X axis running opposite to the display's X axis;
+      // swapping which raw ADC value maps to which panel edge corrects it
+      // without touching rotation (which would also affect Y, and Y was
+      // already right).
+      cfg.x_min = 4095;
+      cfg.x_max = 0;
       cfg.y_min = 0;
       cfg.y_max = 4095;
       cfg.pin_int = 36;
