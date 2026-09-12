@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <string.h>
 
+#include "http_json.h"
+#include "network_health.h"
 #include "secrets.h"
 #include "tab_claude.h"
 
@@ -85,16 +87,27 @@ void real_poll_tick() {
   // happens immediately rather than waiting for the next interval, so
   // Accept/Deny feels responsive.
   if (g_pending_decision[0]) {
-    String url = String(API_BASE_URL) + "/api/claude/pending/" + g_pending_decision_request_id +
-                 "/decide";
+    // Fixed buffer + snprintf, not String concatenation -- see the
+    // comment on this same pattern in weather_client.cpp's
+    // real_poll_tick(). request_id is at most CLAUDE_REQUEST_ID_LEN (40).
+    char url[96];
+    snprintf(url, sizeof(url), "%s/api/claude/pending/%s/decide", API_BASE_URL,
+             g_pending_decision_request_id);
     HTTPClient http;
     http.begin(url);
+    // See the setReuse() comment on the GET below -- same reasoning
+    // applies to this POST's response body.
+    http.setReuse(false);
     http.addHeader("Content-Type", "application/json");
     http.setTimeout(5000);
     char body[32];
     snprintf(body, sizeof(body), "{\"decision\":\"%s\"}", g_pending_decision);
-    int code = http.POST(body);
+    // uint8_t* overload, not POST(String) -- a char* body implicitly
+    // converts to a temporary String otherwise, one more small
+    // allocation on every decision.
+    int code = http.POST(reinterpret_cast<uint8_t *>(body), strlen(body));
     Serial.printf("[Claude] decide %s -> code=%d\n", g_pending_decision_request_id, code);
+    network_health_record_result(code >= 200 && code < 300);
     http.end();
     g_pending_decision[0] = '\0';
     g_last_poll_ms = 0;  // force an immediate re-poll next tick to reflect the change
@@ -104,22 +117,30 @@ void real_poll_tick() {
   if (g_last_poll_ms != 0 && millis() - g_last_poll_ms < POLL_INTERVAL_MS) return;
   g_last_poll_ms = millis();
 
-  String url = String(API_BASE_URL) + "/api/claude/pending";
+  // Fixed buffer + snprintf, not String concatenation -- see the comment
+  // on this same pattern in weather_client.cpp's real_poll_tick().
+  char url[96];
+  snprintf(url, sizeof(url), "%s/api/claude/pending", API_BASE_URL);
   HTTPClient http;
   http.begin(url);
+  // Keep-alive reuse is unsafe here: http_read_json() only reads up to its
+  // buffer size, so a response bigger than that leaves unread bytes on the
+  // socket -- HTTPClient would otherwise think that connection is still
+  // clean and hand it back on the next request, corrupting it. Confirmed
+  // live: this exact pattern produced a permanently broken socket (write()
+  // failing forever on the same fd) after enough poll cycles. Forcing a
+  // fresh connection per request avoids it entirely.
+  http.setReuse(false);
   http.setTimeout(5000);
   int code = http.GET();
 
   if (code == 200) {
-    // NOTE: briefly switched to deserializeJson(doc, http.getStream()) as
-    // a heap-fragmentation mitigation -- reverted after it hung the whole
-    // device on a live test, right after tapping Accept (see
-    // weather_client.cpp for the fuller explanation: a known ArduinoJson+
-    // HTTPClient incompatibility where stream-based parsing can block
-    // indefinitely on a keep-alive connection). Back to getString().
-    String body = http.getString();
+    // http_read_json() -- shared bounded-read helper, verified live to
+    // avoid both the fragmentation getString() caused and the hang
+    // stream-based parsing caused (right after tapping Accept, on this
+    // exact client, previously). See src/http_json.h.
     DynamicJsonDocument doc(2048);
-    DeserializationError err = deserializeJson(doc, body);
+    DeserializationError err = http_read_json(http, doc);
     if (err == DeserializationError::Ok) {
       JsonArrayConst items = doc.as<JsonArrayConst>();
       ClaudePendingRequest req;
@@ -133,11 +154,14 @@ void real_poll_tick() {
         req.queue_count = count;
       }
       claude_apply_pending(req);
+      network_health_record_result(true);
     } else {
       Serial.printf("[Claude] JSON parse failed: %s\n", err.c_str());
+      network_health_record_result(false);
     }
   } else {
     Serial.printf("[Claude] GET failed, code=%d\n", code);
+    network_health_record_result(false);
   }
   http.end();
 }

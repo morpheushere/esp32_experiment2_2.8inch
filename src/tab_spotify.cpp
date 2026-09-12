@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "bauhaus_colors.h"
+#include "spotify_client.h"
 
 namespace {
 
@@ -20,6 +21,16 @@ lv_obj_t *g_badge_icon = nullptr;
 lv_obj_t *g_track_label = nullptr;
 lv_obj_t *g_artist_label = nullptr;
 lv_obj_t *g_placeholder_label = nullptr;
+lv_obj_t *g_control_row = nullptr;
+lv_obj_t *g_playpause_icon = nullptr;
+
+// Tracks the last-known state so playpause_clicked_cb() knows which
+// action to submit -- the button always submits whichever action would
+// *change* the current state (mirrors every real player's play/pause
+// button), which is the opposite convention from the passive status
+// badge above (that one shows what's happening right now, not what
+// tapping it would do -- but it isn't actually tappable, so no conflict).
+bool g_is_playing = false;
 
 // REVERTED a static-array version of this buffer back to malloc(). Tried
 // a static array (no malloc at all) as a fragmentation-proof fix, since
@@ -68,6 +79,48 @@ void ensure_art_canvas() {
   lv_obj_move_foreground(g_badge_bg);
 }
 
+// ---- playback control buttons --------------------------------------------
+// Deferred to spotify_client_tick() via spotify_submit_control() -- never
+// do blocking network I/O synchronously from a touch-event callback (see
+// that function's header comment, and the reentrancy note on
+// spotify_client_tick() above -- the same class of bug that once
+// corrupted tabview touch tracking).
+
+void prev_clicked_cb(lv_event_t *e) {
+  LV_UNUSED(e);
+  spotify_submit_control("previous");
+}
+
+void next_clicked_cb(lv_event_t *e) {
+  LV_UNUSED(e);
+  spotify_submit_control("next");
+}
+
+void playpause_clicked_cb(lv_event_t *e) {
+  LV_UNUSED(e);
+  spotify_submit_control(g_is_playing ? "pause" : "play");
+}
+
+// Small, square, icon-only, outlined in white -- deliberately neutral so
+// the row doesn't compete with whatever colors are in the album art above
+// it (unlike the Claude tab's buttons, which carry brand color since nothing
+// else on that tab does).
+lv_obj_t *make_control_button(lv_obj_t *parent, const char *symbol, lv_event_cb_t cb) {
+  lv_obj_t *btn = lv_btn_create(parent);
+  lv_obj_set_size(btn, 52, 36);
+  lv_obj_set_style_radius(btn, 8, 0);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(btn, 2, 0);
+  lv_obj_set_style_border_color(btn, bauhaus_white(), 0);
+  lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t *label = lv_label_create(btn);
+  lv_label_set_text(label, symbol);
+  lv_obj_set_style_text_color(label, bauhaus_white(), 0);
+  lv_obj_center(label);
+  return label;  // caller only ever needs to update the play/pause icon's text
+}
+
 }  // namespace
 
 lv_color_t *spotify_art_buffer() { return g_art_buf; }
@@ -77,7 +130,14 @@ void spotify_art_updated() {
 }
 
 void spotify_apply_now_playing(const SpotifyNowPlaying &data) {
-  bool has_track = data.is_playing && data.track[0] != '\0';
+  // Track-loaded, not is_playing -- a paused track must still show its
+  // art/labels/controls (most importantly the Play button) or tapping
+  // Pause would hide the only way to resume, stranding the user. Before
+  // the playback buttons existed, this distinction didn't matter (nothing
+  // on this tab could change is_playing), so it silently conflated "paused"
+  // with "nothing loaded".
+  bool has_track = data.track[0] != '\0';
+  g_is_playing = data.is_playing;
 
   if (g_placeholder_label) {
     if (has_track) {
@@ -107,6 +167,19 @@ void spotify_apply_now_playing(const SpotifyNowPlaying &data) {
     } else {
       lv_obj_add_flag(g_badge_bg, LV_OBJ_FLAG_HIDDEN);
     }
+  }
+  if (g_control_row) {
+    if (has_track) {
+      lv_obj_clear_flag(g_control_row, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(g_control_row, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (g_playpause_icon) {
+    // Opposite convention from the badge above: this shows the *next*
+    // action (tap to pause while playing, tap to play while paused), not
+    // the current state -- see the g_is_playing comment up top.
+    lv_label_set_text(g_playpause_icon, data.is_playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
   }
 }
 
@@ -156,10 +229,47 @@ void build_spotify_tab(lv_obj_t *tab) {
   lv_obj_set_style_text_color(g_artist_label, lv_color_make(200, 200, 200), 0);
   lv_obj_align(g_artist_label, LV_ALIGN_TOP_MID, 0, ART_Y + SPOTIFY_ART_SIZE + 34);
 
+  // Previous / Play-Pause / Next, below the artwork and track/artist labels.
+  // Hidden together with the art/labels above whenever nothing is loaded
+  // (see the has_track comment in spotify_apply_now_playing()).
+  g_control_row = lv_obj_create(tab);
+  lv_obj_set_size(g_control_row, 190, 36);
+  lv_obj_align(g_control_row, LV_ALIGN_TOP_MID, 0, ART_Y + SPOTIFY_ART_SIZE + 60);
+  lv_obj_set_style_bg_opa(g_control_row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(g_control_row, 0, 0);
+  lv_obj_set_style_pad_all(g_control_row, 0, 0);
+  lv_obj_set_style_pad_column(g_control_row, 10, 0);
+  lv_obj_set_flex_flow(g_control_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(g_control_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                         LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(g_control_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(g_control_row, LV_OBJ_FLAG_HIDDEN);
+
+  make_control_button(g_control_row, LV_SYMBOL_PREV, prev_clicked_cb);
+  g_playpause_icon = make_control_button(g_control_row, LV_SYMBOL_PLAY, playpause_clicked_cb);
+  make_control_button(g_control_row, LV_SYMBOL_NEXT, next_clicked_cb);
+
   // "Nothing playing" placeholder -- shown whenever is_playing is false or
   // the cache is empty, so the tab never just goes blank.
   g_placeholder_label = lv_label_create(tab);
   lv_label_set_text(g_placeholder_label, LV_SYMBOL_AUDIO "  Nothing playing");
   lv_obj_set_style_text_color(g_placeholder_label, lv_color_make(160, 160, 160), 0);
   lv_obj_center(g_placeholder_label);
+
+  // TRIED allocating the art canvas's 8KB buffer right here, eagerly at
+  // boot, to grab a contiguous block before WiFi/HTTP activity had a
+  // chance to fragment the heap. Confirmed live this broke WiFi outright:
+  // right after this malloc succeeded (heap still looked fine --
+  // free=104828, largest free block=30708), WiFi's own connection
+  // sequence failed with "[E][NetworkEvents.cpp] postEvent(): Arduino
+  // Event Malloc Failed!" and never recovered -- no [WiFi] connected
+  // message, ever. Same root cause as the earlier static-array regression
+  // (see the malloc() comment above ensure_art_canvas()): WiFi/the network
+  // event system needs its own margin in a specific memory region at
+  // connect time, and total-free-heap or largest-free-block numbers don't
+  // capture that constraint. Reverted -- back to the lazy, deferred
+  // allocation (on tab activation / first art fetch), safely after WiFi
+  // is already up. The album art fragmentation problem this was trying to
+  // fix is real but a fragile art thumbnail is a much smaller problem than
+  // a device that can't connect to WiFi at all.
 }

@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <string.h>
 
+#include "http_json.h"
+#include "network_health.h"
 #include "secrets.h"
 #include "tab_calendar.h"
 
@@ -74,27 +76,39 @@ void real_poll_tick() {
   if (g_last_poll_ms != 0 && millis() - g_last_poll_ms < POLL_INTERVAL_MS) return;
   g_last_poll_ms = millis();
 
-  String url = String(API_BASE_URL) + "/api/calendar/today";
+  // Fixed buffer + snprintf, not String concatenation -- see the comment
+  // on this same pattern in weather_client.cpp's real_poll_tick().
+  char url[96];
+  snprintf(url, sizeof(url), "%s/api/calendar/today", API_BASE_URL);
   HTTPClient http;
   http.begin(url);
+  // Keep-alive reuse is unsafe here: http_read_json() only reads up to its
+  // buffer size, so a response bigger than that leaves unread bytes on the
+  // socket -- HTTPClient would otherwise think that connection is still
+  // clean and hand it back on the next request, corrupting it. Confirmed
+  // live: this exact pattern produced a permanently broken socket (write()
+  // failing forever on the same fd) after enough poll cycles. Forcing a
+  // fresh connection per request avoids it entirely.
+  http.setReuse(false);
   http.setTimeout(8000);
   int code = http.GET();
 
   if (code == 200) {
-    // NOTE: briefly switched to deserializeJson(doc, http.getStream()) as
-    // a heap-fragmentation mitigation -- reverted after it hung the whole
-    // device on a live test (see weather_client.cpp for the fuller
-    // explanation). Back to getString() on all four HTTP clients.
-    String body = http.getString();
+    // http_read_json() -- shared bounded-read helper, verified live to
+    // avoid both the fragmentation getString() caused and the hang
+    // stream-based parsing caused. See src/http_json.h.
     StaticJsonDocument<2048> doc;
-    DeserializationError err = deserializeJson(doc, body);
+    DeserializationError err = http_read_json(http, doc);
     if (err == DeserializationError::Ok) {
       apply_calendar_json(doc);
+      network_health_record_result(true);
     } else {
       Serial.printf("[Calendar] JSON parse failed: %s\n", err.c_str());
+      network_health_record_result(false);
     }
   } else {
     Serial.printf("[Calendar] GET failed, code=%d\n", code);
+    network_health_record_result(false);
   }
   http.end();
 }

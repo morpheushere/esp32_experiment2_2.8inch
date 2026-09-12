@@ -4,6 +4,8 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
+#include "http_json.h"
+#include "network_health.h"
 #include "secrets.h"
 #include "tab_weather.h"
 
@@ -198,37 +200,53 @@ void real_poll_tick() {
   if (g_last_poll_ms != 0 && millis() - g_last_poll_ms < POLL_INTERVAL_MS) return;
   g_last_poll_ms = millis();
 
-  String url = String(API_BASE_URL) + "/api/weather/current";
+  // Fixed buffer + snprintf, not String concatenation -- every String
+  // temporary allocates and frees on the heap, and this runs every poll
+  // (60s here, far more often on Spotify/Claude's clients). Confirmed
+  // live this class of allocation churn contributes to the heap
+  // fragmentation that eventually breaks the socket layer outright
+  // (write()/fillBuffer() allocation failures), independent of and in
+  // addition to the getString()/keep-alive issues already fixed above.
+  char url[96];
+  snprintf(url, sizeof(url), "%s/api/weather/current", API_BASE_URL);
   HTTPClient http;
   http.begin(url);
+  // Keep-alive reuse is unsafe here: http_read_json() only reads up to its
+  // buffer size, so a response bigger than that leaves unread bytes on the
+  // socket -- HTTPClient would otherwise think that connection is still
+  // clean and hand it back on the next request, corrupting it. Confirmed
+  // live: this exact pattern produced a permanently broken socket (write()
+  // failing forever on the same fd) after enough poll cycles. Forcing a
+  // fresh connection per request avoids it entirely.
+  http.setReuse(false);
   http.setTimeout(5000);
   int code = http.GET();
 
   if (code == 200) {
-    // NOTE: briefly tried deserializeJson(doc, http.getStream()) here to
-    // avoid this String allocation (heap-fragmentation mitigation) --
-    // reverted after it caused the whole device to hang on a live test
-    // (a known ArduinoJson+HTTPClient incompatibility: stream-based
-    // parsing can block indefinitely on a keep-alive connection, whereas
-    // getString() handles that safely internally). A hung main loop is
-    // far worse than fragmentation, so back to getString() on all four
-    // HTTP clients.
-    String body = http.getString();
+    // http_read_json() reads into a small shared static buffer with its
+    // own bounded loop, instead of http.getString() (a per-poll String
+    // allocation -- confirmed source of heap fragmentation) or
+    // deserializeJson(doc, http.getStream()) (confirmed to hang the whole
+    // device -- a known ArduinoJson+HTTPClient incompatibility). See
+    // src/http_json.h.
     StaticJsonDocument<2048> doc;
-    DeserializationError err = deserializeJson(doc, body);
+    DeserializationError err = http_read_json(http, doc);
     if (err == DeserializationError::Ok) {
-      Serial.printf("[HTTP] GET %s -> 200 OK (%d bytes)\n", url.c_str(), body.length());
+      Serial.printf("[HTTP] GET %s -> 200 OK\n", url);
       apply_weather_json(doc);
       g_last_success_ms = millis();
       set_stale(false);
+      network_health_record_result(true);
     } else {
       Serial.printf("[JSON] parse failed: %s (keeping last-known values, stale=true)\n",
                      err.c_str());
       set_stale(true);
+      network_health_record_result(false);
     }
   } else {
     Serial.printf("[HTTP] GET failed, code=%d (keeping last-known values, stale=true)\n", code);
     set_stale(true);
+    network_health_record_result(false);
   }
   http.end();
 }

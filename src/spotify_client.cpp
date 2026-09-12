@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <string.h>
 
+#include "http_json.h"
+#include "network_health.h"
 #include "secrets.h"
 #include "tab_spotify.h"
 
@@ -39,6 +41,13 @@ bool g_polling_running = true;
 bool g_canvas_pending = false;
 unsigned long g_last_poll_ms = 0;
 char g_last_art_id[40] = "";
+
+// Set by spotify_submit_control() (called from a touch-event callback in
+// tab_spotify.cpp), consumed by the next real_poll_tick() call from
+// loop() -- same deferred pattern as claude_approval_client.cpp's
+// g_pending_decision, and for the same reason: never do blocking network
+// I/O synchronously inside a touch-event callback.
+char g_pending_control[16] = "";
 
 void fill_mock_art_pattern() {
   lv_color_t *buf = spotify_art_buffer();
@@ -109,9 +118,20 @@ void fetch_art() {
     if (!buf) return;
   }
 
-  String url = String(API_BASE_URL) + "/api/spotify/art.raw";
+  // Fixed buffer + snprintf, not String concatenation -- see the comment
+  // on this same pattern in weather_client.cpp's real_poll_tick().
+  char url[96];
+  snprintf(url, sizeof(url), "%s/api/spotify/art.raw", API_BASE_URL);
   HTTPClient http;
   http.begin(url);
+  // Keep-alive reuse is unsafe here: the size-mismatch and incomplete-read
+  // branches below can both leave part or all of the body unread on the
+  // socket -- HTTPClient would otherwise think that connection is still
+  // clean and hand it back on the next request, corrupting it. Confirmed
+  // live: this exact pattern produced a permanently broken socket (write()
+  // failing forever on the same fd) after enough poll cycles. Forcing a
+  // fresh connection per request avoids it entirely.
+  http.setReuse(false);
   http.setTimeout(8000);
   int code = http.GET();
 
@@ -122,52 +142,107 @@ void fetch_art() {
     if (len != static_cast<int>(expected)) {
       Serial.printf("[Spotify] art size mismatch: got %d bytes, expected %u -- skipping\n", len,
                     static_cast<unsigned>(expected));
+      network_health_record_result(false);
     } else {
       WiFiClient *stream = http.getStreamPtr();
       size_t read_total = stream->readBytes(reinterpret_cast<uint8_t *>(buf), expected);
       if (read_total == expected) {
         spotify_art_updated();
         Serial.printf("[Spotify] art updated (%u bytes)\n", static_cast<unsigned>(expected));
+        network_health_record_result(true);
       } else {
         Serial.printf("[Spotify] art read incomplete: %u/%u bytes\n",
                        static_cast<unsigned>(read_total), static_cast<unsigned>(expected));
+        network_health_record_result(false);
       }
     }
   } else if (code != 404) {
     // 404 is the expected response before any track change has happened
     // since the backend last started -- not a real failure.
     Serial.printf("[Spotify] art GET failed, code=%d\n", code);
+    network_health_record_result(false);
   }
   http.end();
 }
 
+// Sends whichever action was queued by a button tap to the backend's
+// proxy route. Fire-and-forget with respect to the *result* -- errors
+// (most commonly "no active device", per the backend's own control()
+// docstring) are logged, not surfaced in the UI, matching this codebase's
+// existing pattern of degrading quietly rather than showing error state
+// for things the user can't act on from this screen anyway. The next
+// regular poll (forced immediate via g_last_poll_ms = 0) reflects
+// whatever actually happened on Spotify's side.
+void send_pending_control() {
+  // Fixed buffer + snprintf, not String concatenation -- see the comment
+  // on this same pattern in weather_client.cpp's real_poll_tick().
+  char url[96];
+  snprintf(url, sizeof(url), "%s/api/spotify/control/%s", API_BASE_URL, g_pending_control);
+  HTTPClient http;
+  http.begin(url);
+  http.setReuse(false);
+  http.setTimeout(5000);
+  // uint8_t* overload, not POST(String) -- an empty string literal
+  // implicitly converts to a temporary String otherwise, one more small
+  // allocation on every button tap. No body needed either way -- the
+  // action is in the URL path.
+  int code = http.POST(nullptr, 0);
+  Serial.printf("[Spotify] control '%s' -> code=%d\n", g_pending_control, code);
+  // The backend route always answers 200 (with ok:false inside the body
+  // for app-level outcomes like "no active device") -- so a non-2xx code
+  // here specifically means the socket-level request itself failed, which
+  // is exactly what network health cares about, not whether Spotify had
+  // something to act on.
+  network_health_record_result(code >= 200 && code < 300);
+  http.end();
+  g_pending_control[0] = '\0';
+  g_last_poll_ms = 0;  // force an immediate re-poll next tick to reflect the change
+}
+
 void real_poll_tick() {
   if (WiFi.status() != WL_CONNECTED) return;  // weather_client owns WiFi connect/retry
+
+  // A button tap takes priority over the regular poll, and happens
+  // immediately rather than waiting for the next interval -- same
+  // reasoning as claude_approval_client.cpp's decision-priority check.
+  if (g_pending_control[0]) {
+    send_pending_control();
+    return;
+  }
+
   if (g_last_poll_ms != 0 && millis() - g_last_poll_ms < POLL_INTERVAL_MS) return;
   g_last_poll_ms = millis();
 
   bool art_changed = false;
   {
-    String url = String(API_BASE_URL) + "/api/spotify/now-playing";
+    // Fixed buffer + snprintf, not String concatenation -- see the
+    // comment on this same pattern in weather_client.cpp's
+    // real_poll_tick().
+    char url[96];
+    snprintf(url, sizeof(url), "%s/api/spotify/now-playing", API_BASE_URL);
     HTTPClient http;
     http.begin(url);
+    // See the setReuse() comment in fetch_art() below -- same reasoning
+    // applies to this endpoint's response body.
+    http.setReuse(false);
     http.setTimeout(5000);
     int code = http.GET();
     if (code == 200) {
-      // NOTE: briefly switched to deserializeJson(doc, http.getStream())
-      // as a heap-fragmentation mitigation -- reverted after it hung the
-      // whole device on a live test (see weather_client.cpp for the
-      // fuller explanation). Back to getString() on all four HTTP clients.
-      String body = http.getString();
+      // http_read_json() -- shared bounded-read helper, verified live to
+      // avoid both the fragmentation getString() caused and the hang
+      // stream-based parsing caused. See src/http_json.h.
       StaticJsonDocument<512> doc;
-      DeserializationError err = deserializeJson(doc, body);
+      DeserializationError err = http_read_json(http, doc);
       if (err == DeserializationError::Ok) {
         art_changed = apply_now_playing_json(doc);
+        network_health_record_result(true);
       } else {
         Serial.printf("[Spotify] JSON parse failed: %s\n", err.c_str());
+        network_health_record_result(false);
       }
     } else {
       Serial.printf("[Spotify] now-playing GET failed, code=%d\n", code);
+      network_health_record_result(false);
     }
     http.end();
   }
@@ -215,4 +290,8 @@ void spotify_client_tick() {
 void spotify_set_polling_running(bool running) {
   g_polling_running = running;
   if (running) g_canvas_pending = true;
+}
+
+void spotify_submit_control(const char *action) {
+  strlcpy(g_pending_control, action, sizeof(g_pending_control));
 }

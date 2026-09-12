@@ -16,3 +16,10 @@ void spotify_client_tick();
 // tab (saves network/backend load while nobody's looking at it), true
 // when it becomes active again.
 void spotify_set_polling_running(bool running);
+
+// Records a playback command ("play"/"pause"/"next"/"previous") tapped
+// from a button's touch-event callback in tab_spotify.cpp. Deferred to
+// the next spotify_client_tick() rather than sent immediately, same
+// reasoning as claude_approval_submit_decision(): never do blocking
+// network I/O synchronously inside a touch-event callback.
+void spotify_submit_control(const char *action);
