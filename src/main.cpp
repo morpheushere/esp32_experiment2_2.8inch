@@ -2,6 +2,7 @@
 #include <lvgl.h>
 
 #include "calendar_client.h"
+#include "claude_approval_client.h"
 #include "display_init.h"
 #include "spotify_client.h"
 #include "ui_tabview.h"
@@ -17,6 +18,7 @@ void setup() {
   weather_client_init();
   spotify_client_init();
   calendar_client_init();
+  claude_approval_client_init();
 
   g_last_tick_ms = millis();
 }
@@ -30,6 +32,7 @@ void loop() {
   weather_client_tick();
   spotify_client_tick();
   calendar_client_tick();
+  claude_approval_client_tick();
 
   delay(5);
 }

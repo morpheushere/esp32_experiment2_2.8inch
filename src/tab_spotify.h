@@ -7,13 +7,16 @@
 // memcpy'd straight into this canvas's buffer with no resizing/decoding on
 // this end, so a mismatch here would just scramble the image.
 //
-// Sized down from an initial 120 after measuring live on this board: once
-// WiFi is connected (tab 2's canvas is allocated lazily, after WiFi init --
-// see spotify_ensure_art_canvas()), free heap drops to ~60KB but the
-// *largest contiguous block* is only ~19-20KB (fragmentation, not real
-// exhaustion) -- a 120x120 canvas (28800 bytes) fails to allocate outright.
-// 80x80 (12800 bytes) fits with real margin.
-constexpr int SPOTIFY_ART_SIZE = 80;
+// Sized down twice now, both times from live measurements, not guesses.
+// First 120 -> 80 (see git history). Then, after adding tabs 3/4 (more
+// permanent .bss/heap usage) and observing a live allocation failure with
+// only ~4.3KB in the largest contiguous block at that moment (WiFi/HTTP/
+// JSON churn fragments the heap over a session -- it doesn't naturally
+// coalesce back), 80 -> 64 (8192 bytes) to meaningfully improve the odds
+// of finding a large-enough contiguous block. fetch_art() also retries
+// this allocation whenever new art actually needs showing (not just on
+// tab-switch), so a transient bad moment isn't permanent for the session.
+constexpr int SPOTIFY_ART_SIZE = 64;
 
 struct SpotifyNowPlaying {
   bool is_playing = false;

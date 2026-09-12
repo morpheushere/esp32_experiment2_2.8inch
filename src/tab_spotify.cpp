@@ -21,16 +21,22 @@ lv_obj_t *g_track_label = nullptr;
 lv_obj_t *g_artist_label = nullptr;
 lv_obj_t *g_placeholder_label = nullptr;
 
-// Deliberately NOT allocated in build_spotify_tab(), which runs at boot
-// alongside tab 1's four canvases. Measured live on this board: with tab
-// 1's canvases already down to ~118KB free heap, adding this ~29KB art
-// canvas at boot dropped that to ~88KB -- just enough for WiFi's own
-// driver init (esp_netif_create_default_wifi_sta) to fail outright with a
-// heap-exhaustion crash-reboot loop. WiFi init is a one-time cost at
-// startup; the art canvas is only ever needed once the user actually
-// switches to this tab. Deferring it here means it competes with nothing
-// at the moment it's actually allocated. Idempotent -- safe to call every
-// time the tab becomes active.
+// REVERTED a static-array version of this buffer back to malloc(). Tried
+// a static array (no malloc at all) as a fragmentation-proof fix, since
+// this canvas's *dynamic* allocation had been failing under heap
+// fragmentation elsewhere on this device. Live testing showed that broke
+// WiFi outright instead (STA config failed, every boot) -- confirmed by
+// isolating the change: reverting just this one array fixed it. Root
+// cause understood in hindsight: .bss and the heap share the same DRAM
+// pool on ESP32, so a static reservation isn't "free" memory sitting
+// unused next to the heap, it directly lowers the heap's total ceiling --
+// an ~8KB static array was apparently enough to push whatever margin
+// esp_wifi_set_config() needs at init below zero. Back to the
+// known-working lazy-malloc approach (still deferred past WiFi init,
+// still idempotent/retried on-demand from fetch_art()); the heap-
+// fragmentation problem this was trying to fix is real but a fragile art
+// thumbnail is a much smaller problem than a device that can't connect
+// to WiFi at all.
 void ensure_art_canvas() {
   if (g_art_canvas || !g_tab) return;
 
@@ -52,7 +58,14 @@ void ensure_art_canvas() {
   // Neutral placeholder fill until the first track's art arrives.
   lv_canvas_fill_bg(g_art_canvas, lv_color_make(0x2A, 0x2E, 0x3A), LV_OPA_COVER);
   lv_obj_add_flag(g_art_canvas, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_move_background(g_art_canvas);  // created after the badge/labels; keep it behind them
+  // NOTE: previously called lv_obj_move_background() here to keep the
+  // canvas behind the badge/labels (created earlier, at boot). Confirmed
+  // live that this was the cause of the art only ever showing a thin top
+  // sliver: with the canvas sent to the back of g_tab's z-order, sibling
+  // objects covered most of it. Leaving it in normal (topmost, since it's
+  // created last) z-order and instead moving the badge to the front below
+  // fixes this while still keeping the badge visible on top of the art.
+  lv_obj_move_foreground(g_badge_bg);
 }
 
 }  // namespace

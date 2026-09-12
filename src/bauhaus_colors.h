@@ -10,3 +10,8 @@ static inline lv_color_t bauhaus_yellow() { return lv_color_make(0xFF, 0xC9, 0x0
 static inline lv_color_t bauhaus_blue() { return lv_color_make(0x00, 0x5E, 0xB8); }
 static inline lv_color_t bauhaus_white() { return lv_color_make(0xFF, 0xFF, 0xFF); }
 static inline lv_color_t bauhaus_black() { return lv_color_make(0x00, 0x00, 0x00); }
+
+// Approximation of Claude/Anthropic's brand terracotta -- not a guaranteed
+// pixel-exact match to their actual design tokens, just the closest
+// reasonable stand-in for the Claude tab's Accept button and logo mark.
+static inline lv_color_t claude_orange() { return lv_color_make(0xDA, 0x77, 0x56); }

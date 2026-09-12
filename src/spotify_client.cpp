@@ -17,7 +17,11 @@
 
 namespace {
 
-constexpr unsigned long POLL_INTERVAL_MS = 5000;  // matches the backend's own 5s sync interval
+// Was 5000 (matching the backend's own sync interval exactly) -- loosened
+// to reduce HTTPClient/JSON allocation churn contributing to the heap
+// fragmentation that broke the album art canvas. Still feels live for a
+// "now playing" display; the backend's own cache updates independently.
+constexpr unsigned long POLL_INTERVAL_MS = 8000;
 
 const char *MOCK_NOW_PLAYING_JSON = R"json(
 {
@@ -94,7 +98,16 @@ void mock_poll_tick() {
 // format lv_color_t expects (see api/spotify_client.py's _rgb565_bytes()).
 void fetch_art() {
   lv_color_t *buf = spotify_art_buffer();
-  if (!buf) return;
+  if (!buf) {
+    // The first allocation attempt (on tab activation) can fail under
+    // heap fragmentation from concurrent WiFi/HTTP/JSON activity -- worth
+    // retrying right when there's actually new art to show, not just
+    // waiting for the next tab-switch. ensure_art_canvas() is idempotent
+    // and cheap to call speculatively.
+    spotify_ensure_art_canvas();
+    buf = spotify_art_buffer();
+    if (!buf) return;
+  }
 
   String url = String(API_BASE_URL) + "/api/spotify/art.raw";
   HTTPClient http;
@@ -141,6 +154,10 @@ void real_poll_tick() {
     http.setTimeout(5000);
     int code = http.GET();
     if (code == 200) {
+      // NOTE: briefly switched to deserializeJson(doc, http.getStream())
+      // as a heap-fragmentation mitigation -- reverted after it hung the
+      // whole device on a live test (see weather_client.cpp for the
+      // fuller explanation). Back to getString() on all four HTTP clients.
       String body = http.getString();
       StaticJsonDocument<512> doc;
       DeserializationError err = deserializeJson(doc, body);

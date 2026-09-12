@@ -81,6 +81,10 @@ void real_poll_tick() {
   int code = http.GET();
 
   if (code == 200) {
+    // NOTE: briefly switched to deserializeJson(doc, http.getStream()) as
+    // a heap-fragmentation mitigation -- reverted after it hung the whole
+    // device on a live test (see weather_client.cpp for the fuller
+    // explanation). Back to getString() on all four HTTP clients.
     String body = http.getString();
     StaticJsonDocument<2048> doc;
     DeserializationError err = deserializeJson(doc, body);

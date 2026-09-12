@@ -205,6 +205,14 @@ void real_poll_tick() {
   int code = http.GET();
 
   if (code == 200) {
+    // NOTE: briefly tried deserializeJson(doc, http.getStream()) here to
+    // avoid this String allocation (heap-fragmentation mitigation) --
+    // reverted after it caused the whole device to hang on a live test
+    // (a known ArduinoJson+HTTPClient incompatibility: stream-based
+    // parsing can block indefinitely on a keep-alive connection, whereas
+    // getString() handles that safely internally). A hung main loop is
+    // far worse than fragmentation, so back to getString() on all four
+    // HTTP clients.
     String body = http.getString();
     StaticJsonDocument<2048> doc;
     DeserializationError err = deserializeJson(doc, body);
