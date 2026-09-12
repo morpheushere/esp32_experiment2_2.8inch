@@ -155,7 +155,7 @@ void advance_wifi_state_machine() {
         Serial.printf("[WiFi] connected, IP=%s\n", WiFi.localIP().toString().c_str());
         g_wifi_state = WifiState::CONNECTED;
         g_backoff_index = 0;
-        if (g_last_success_ms == 0) weather_set_status_line("Connected, fetching...");
+        if (g_last_success_ms == 0) weather_set_status_line("Loading realtime weather...");
       } else if (millis() - g_wifi_state_change_ms > CONNECT_ATTEMPT_TIMEOUT_MS) {
         unsigned long backoff = current_backoff_ms();
         Serial.printf("[WiFi] connect failed, retrying in %lus\n", backoff / 1000);
@@ -178,7 +178,7 @@ void advance_wifi_state_machine() {
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         g_wifi_state = WifiState::CONNECTING;
         g_wifi_state_change_ms = millis();
-        if (g_last_success_ms == 0) weather_set_status_line("WiFi connecting...");
+        if (g_last_success_ms == 0) weather_set_status_line("Loading realtime weather...");
       }
       break;
 
@@ -238,7 +238,7 @@ void weather_client_init() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   g_wifi_state_change_ms = millis();
-  weather_set_status_line("WiFi connecting...");
+  weather_set_status_line("Loading realtime weather...");
 #endif
 }
 

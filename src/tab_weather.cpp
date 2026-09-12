@@ -538,7 +538,7 @@ void build_weather_tab(lv_obj_t *tab) {
   }
 
   g_status_label = lv_label_create(tab);
-  lv_label_set_text(g_status_label, "Starting...");
+  lv_label_set_text(g_status_label, "Loading realtime weather...");
   lv_obj_set_style_text_color(g_status_label, lv_color_white(), 0);
   lv_obj_align(g_status_label, LV_ALIGN_BOTTOM_LEFT, 4, -2);
 

@@ -3,8 +3,9 @@
 #include <lvgl.h>
 
 #include "bauhaus_colors.h"
+#include "calendar_client.h"
 #include "spotify_client.h"
-#include "tab_placeholder.h"
+#include "tab_calendar.h"
 #include "tab_spotify.h"
 #include "tab_weather.h"
 
@@ -30,6 +31,7 @@ void tabview_changed_cb(lv_event_t *e) {
   // either tab's one-time canvas allocation.
   weather_set_scene_running(active == 0);
   spotify_set_polling_running(active == 1);
+  calendar_set_polling_running(active == 2);
 }
 
 }  // namespace
@@ -48,11 +50,11 @@ void build_tabview() {
 
   lv_obj_t *tab1 = lv_tabview_add_tab(tabview, "Weather");
   lv_obj_t *tab2 = lv_tabview_add_tab(tabview, "Spotify");
-  lv_obj_t *tab3 = lv_tabview_add_tab(tabview, "Tab 3");
+  lv_obj_t *tab3 = lv_tabview_add_tab(tabview, "Calendar");
 
   build_weather_tab(tab1);
   build_spotify_tab(tab2);
-  build_placeholder_tab(tab3, "Coming soon");
+  build_calendar_tab(tab3);
 
   lv_obj_add_event_cb(tabview, tabview_changed_cb, LV_EVENT_VALUE_CHANGED, tabview);   // swipe
   lv_obj_add_event_cb(tab_btns, tabview_changed_cb, LV_EVENT_VALUE_CHANGED, tabview);  // tap
@@ -64,4 +66,5 @@ void build_tabview() {
   // relying on a callback that hasn't fired yet.
   weather_set_scene_running(true);
   spotify_set_polling_running(false);
+  calendar_set_polling_running(false);
 }
