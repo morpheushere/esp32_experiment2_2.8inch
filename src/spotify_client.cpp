@@ -120,8 +120,15 @@ void fetch_art() {
 
   // Fixed buffer + snprintf, not String concatenation -- see the comment
   // on this same pattern in weather_client.cpp's real_poll_tick().
+  // ?size= is required, not optional -- this backend now serves other
+  // ESP32 devices with different panel sizes sharing the same Spotify
+  // session (e.g. a 7" board at 240px), and resizes/caches art per the
+  // requested size on demand. Omitting it would silently fall back to
+  // whichever size is that backend's own default for older firmware,
+  // not necessarily this device's SPOTIFY_ART_SIZE. See
+  // get_art_bytes() in strava-heatmap-pwa's api/spotify_client.py.
   char url[96];
-  snprintf(url, sizeof(url), "%s/api/spotify/art.raw", API_BASE_URL);
+  snprintf(url, sizeof(url), "%s/api/spotify/art.raw?size=%d", API_BASE_URL, SPOTIFY_ART_SIZE);
   HTTPClient http;
   http.begin(url);
   // Keep-alive reuse is unsafe here: the size-mismatch and incomplete-read
